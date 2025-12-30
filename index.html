@@ -1,0 +1,47 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>LEGO BOOST Control</title>
+  <style>
+    body { font-family: Arial; padding: 16px; }
+    .row { margin: 10px 0; }
+    button { padding: 8px 14px; margin-right: 6px; }
+    input[type=range] { width: 220px; }
+    .mono { font-family: Consolas, monospace; }
+  </style>
+</head>
+<body>
+
+<h2>LEGO BOOST – sterowanie</h2>
+
+<div class="row">
+  <button id="connect">Połącz</button>
+  <button id="disconnect">Rozłącz</button>
+  <button id="stop">STOP</button>
+</div>
+
+<div class="row">
+  Prędkość:
+  <input id="speed" type="range" min="5" max="80" value="25">
+  <span id="speedVal" class="mono">25</span>
+</div>
+
+<div class="row">
+  Skręt:
+  <input id="steer" type="range" min="0" max="100" value="60">
+  <span id="steerVal" class="mono">0.60</span>
+</div>
+
+<div class="row mono">
+  Status: <span id="status">rozłączony</span>
+</div>
+
+<p>
+Sterowanie: ↑ ↓ ← → (keydown/keyup)<br>
+Spacja = STOP
+</p>
+
+<script src="renderer.js"></script>
+</body>
+</html>

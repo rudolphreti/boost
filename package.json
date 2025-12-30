@@ -1,0 +1,15 @@
+{
+  "name": "boost-ui",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^39.2.7"
+  },
+  "dependencies": {
+    "node-poweredup": "^10.0.0"
+  }
+}
