@@ -233,6 +233,4 @@ ipcRenderer.on("boost:color", (_evt, msg) => {
 
 preventArrowKeyAdjust(ui.speed);
 preventArrowKeyAdjust(ui.steer);
-log(`Czujnik koloru (port ${COLOR_PORT}): nieaktywny - oczekiwanie na połączenie.`);
-log(`Autoaktywacja czujnika koloru: port ${COLOR_PORT}, tryb color.`);
 log("renderer.js załadowany OK");
