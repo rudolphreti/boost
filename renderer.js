@@ -6,15 +6,10 @@ const ui = {
   speed: document.getElementById("speed"),
   speedVal: document.getElementById("speedVal"),
   steer: document.getElementById("steer"),
-  steerVal: document.getElementById("steerVal"),
-  colorPort: document.getElementById("colorPort"),
-  colorMode: document.getElementById("colorMode"),
-  colorAttachBtn: document.getElementById("colorAttach"),
-  refreshDevicesBtn: document.getElementById("refreshDevices"),
-  colorName: document.getElementById("colorName"),
-  colorCode: document.getElementById("colorCode"),
-  colorSource: document.getElementById("colorSource")
+  steerVal: document.getElementById("steerVal")
 };
+
+const COLOR_PORT = "D";
 
 const state = {
   connected: false,
@@ -106,43 +101,32 @@ function applyDrive() {
   sendDrive(t.left, t.right);
 }
 
-function updateColorUI(colorCode, source) {
-  const name = COLOR_PL[colorCode] || `Kod ${colorCode}`;
-  ui.colorName.textContent = name;
-  ui.colorCode.textContent = String(colorCode);
-  ui.colorSource.textContent = source || "—";
-
-  if (COLOR_PL[colorCode]) {
-    speakPL(name);
-  }
-}
-
-async function refreshDevices() {
-  const res = await ipcRenderer.invoke("boost:listDevices");
-  if (!res?.ok) return;
-
-  const devices = res.devices || [];
-  log(`Urządzenia (hub.getDevices): ${devices.length}`);
-
-  // Add numeric ports to dropdown (without duplicating existing)
-  const existing = new Set([...ui.colorPort.options].map(o => o.value));
-
-  for (const d of devices) {
-    const pid = d.portId;
-    if (pid === null || pid === undefined) continue;
-    const val = String(pid);
-    if (existing.has(val)) continue;
-
-    const opt = document.createElement("option");
-    opt.value = val;
-    opt.textContent = `${val} (type=${d.type ?? "?"})`;
-    ui.colorPort.appendChild(opt);
-    existing.add(val);
-  }
-}
-
 function resetDirections() {
   state.directions = { up: false, down: false, left: false, right: false };
+}
+
+async function activateColorSensor() {
+  log(`Auto: aktywacja czujnika koloru na porcie ${COLOR_PORT}...`);
+  const res = await ipcRenderer.invoke("boost:colorAttach", { port: COLOR_PORT, mode: "color" });
+
+  if (res?.ok) {
+    const activeMode = res.mode || "color";
+    const activeModeId = res.modeId !== undefined ? `id=${res.modeId}` : "";
+    log(`OK: czujnik koloru aktywny (port=${COLOR_PORT}, mode=${activeMode} ${activeModeId}).`);
+    state.lastSpoken = null;
+    state.lastColorCode = null;
+  } else {
+    log(`Błąd aktywacji czujnika na porcie ${COLOR_PORT}: ${res?.error || "?"}`);
+  }
+}
+
+function preventArrowKeyAdjust(inputEl) {
+  if (!inputEl) return;
+  inputEl.addEventListener("keydown", (e) => {
+    if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) {
+      e.preventDefault();
+    }
+  });
 }
 
 document.getElementById("connect").onclick = async () => {
@@ -153,7 +137,7 @@ document.getElementById("connect").onclick = async () => {
     setConnected(true);
     setStatus("połączony");
     log("Połączono OK");
-    await refreshDevices();
+    await activateColorSensor();
   } else {
     setConnected(false);
     setStatus("błąd");
@@ -208,32 +192,6 @@ window.addEventListener("blur", () => {
   sendDrive(0,0);
 });
 
-ui.colorAttachBtn.onclick = async () => {
-  const port = ui.colorPort.value;
-  const mode = ui.colorMode.value;
-
-  log(`Klik: Aktywuj czujnik -> port=${port} mode=${mode}`);
-  const res = await ipcRenderer.invoke("boost:colorAttach", { port, mode });
-
-  if (res?.ok) {
-    const activeMode = res.mode || mode;
-    const activeModeId = res.modeId !== undefined ? `id=${res.modeId}` : "";
-    log(`OK: czujnik aktywny (port=${port}, mode=${activeMode} ${activeModeId}). Przyłóż klocek.`);
-    state.lastSpoken = null;
-    state.lastColorCode = null;
-    ui.colorName.textContent = "—";
-    ui.colorCode.textContent = "—";
-    ui.colorSource.textContent = `${port}/${activeMode}`;
-  } else {
-    log(`Błąd aktywacji czujnika: ${res?.error || "?"}`);
-  }
-};
-
-ui.refreshDevicesBtn.onclick = async () => {
-  log("Klik: Odśwież listę portów");
-  await refreshDevices();
-};
-
 // Messages from main process
 ipcRenderer.on("ui:log", (_evt, line) => log(line));
 
@@ -267,11 +225,14 @@ ipcRenderer.on("boost:color", (_evt, msg) => {
   const code = msg.color;
   const source = `${msg.port}/${msg.mode}`;
 
-  if (code === state.lastColorCode) return;
+  log(`Wykryty kolor : ${code},\nŹródło: ${source}`);
+  const spoken = COLOR_PL[code];
+  if (spoken && code !== state.lastColorCode) speakPL(spoken);
   state.lastColorCode = code;
-
-  log(`COLOR: ${source} -> ${code} (${COLOR_PL[code] || "?"})`);
-  updateColorUI(code, source);
 });
 
+preventArrowKeyAdjust(ui.speed);
+preventArrowKeyAdjust(ui.steer);
+log(`Czujnik koloru (port ${COLOR_PORT}): nieaktywny - oczekiwanie na połączenie.`);
+log(`Autoaktywacja czujnika koloru: port ${COLOR_PORT}, tryb color.`);
 log("renderer.js załadowany OK");
