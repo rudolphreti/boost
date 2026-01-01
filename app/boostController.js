@@ -2,6 +2,7 @@ import { PoweredUP } from "node-poweredup";
 
 const LEFT_PORT_DEFAULT = "A";
 const RIGHT_PORT_DEFAULT = "B";
+const HEAD_PORT_DEFAULT = "C";
 
 export class BoostController {
   win = null;
@@ -10,6 +11,7 @@ export class BoostController {
 
   leftMotor = null;
   rightMotor = null;
+  headMotor = null;
 
   colorDevice = null;
   colorMode = null;
@@ -151,6 +153,7 @@ export class BoostController {
 
           try { this.leftMotor = await this.hub.waitForDeviceAtPort(LEFT_PORT_DEFAULT); } catch {}
           try { this.rightMotor = await this.hub.waitForDeviceAtPort(RIGHT_PORT_DEFAULT); } catch {}
+          try { this.headMotor = await this.hub.waitForDeviceAtPort(HEAD_PORT_DEFAULT); } catch {}
 
           this.sendStatus("connected", "Połączony");
           this.sendLog("Połączono OK");
@@ -178,6 +181,7 @@ export class BoostController {
 
     this.leftMotor = null;
     this.rightMotor = null;
+    this.headMotor = null;
     this.colorDevice = null;
     this.colorMode = null;
     this.colorModeName = null;
@@ -196,6 +200,13 @@ export class BoostController {
 
     await this.leftMotor.setPower(l);
     await this.rightMotor.setPower(r);
+  }
+
+  async head(power) {
+    if (!this.hub || !this.headMotor) return;
+
+    const p = Math.max(-100, Math.min(100, Math.trunc(power)));
+    await this.headMotor.setPower(p);
   }
 
   async attachColorSensor(portInput, modeInput) {

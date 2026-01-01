@@ -5,6 +5,8 @@ const ui = {
   log: document.getElementById("log"),
   speed: document.getElementById("speed"),
   speedVal: document.getElementById("speedVal"),
+  headSpeed: document.getElementById("headSpeed"),
+  headSpeedVal: document.getElementById("headSpeedVal"),
   steer: document.getElementById("steer"),
   steerVal: document.getElementById("steerVal")
 };
@@ -14,7 +16,9 @@ const COLOR_PORT = "D";
 const state = {
   connected: false,
   directions: { up: false, down: false, left: false, right: false },
+  head: { left: false, right: false },
   lastDrive: { left: 0, right: 0 },
+  lastHead: 0,
   lastSpoken: null,
   lastColorCode: null
 };
@@ -87,6 +91,12 @@ function computeDrive() {
   };
 }
 
+function computeHead() {
+  const speed = Number(ui.headSpeed.value);
+  const direction = state.head.left ? -1 : state.head.right ? 1 : 0;
+  return clamp100(direction * speed);
+}
+
 async function sendDrive(l, r) {
   l = Math.trunc(l);
   r = Math.trunc(r);
@@ -96,13 +106,31 @@ async function sendDrive(l, r) {
   await ipcRenderer.invoke("boost:drive", { left: l, right: r });
 }
 
+async function sendHead(power) {
+  power = Math.trunc(power);
+  if (!state.connected) return;
+  if (power === state.lastHead) return;
+  state.lastHead = power;
+  await ipcRenderer.invoke("boost:head", { power });
+}
+
 function applyDrive() {
   const t = computeDrive();
   sendDrive(t.left, t.right);
 }
 
+function applyHead() {
+  const p = computeHead();
+  sendHead(p);
+}
+
 function resetDirections() {
   state.directions = { up: false, down: false, left: false, right: false };
+}
+
+function resetHead() {
+  state.head = { left: false, right: false };
+  state.lastHead = 0;
 }
 
 async function activateColorSensor() {
@@ -151,17 +179,25 @@ document.getElementById("disconnect").onclick = async () => {
   setConnected(false);
   setStatus("rozłączony");
   sendDrive(0,0);
+  sendHead(0);
 };
 
 document.getElementById("stop").onclick = () => {
   log("Klik: STOP");
   resetDirections();
+  resetHead();
   sendDrive(0,0);
+  sendHead(0);
 };
 
 ui.speed.oninput = () => {
   ui.speedVal.textContent = ui.speed.value;
   applyDrive();
+};
+
+ui.headSpeed.oninput = () => {
+  ui.headSpeedVal.textContent = ui.headSpeed.value;
+  applyHead();
 };
 
 ui.steer.oninput = () => {
@@ -175,8 +211,11 @@ window.addEventListener("keydown", e => {
   if (e.code==="ArrowDown") state.directions.down=true;
   if (e.code==="ArrowLeft") state.directions.left=true;
   if (e.code==="ArrowRight") state.directions.right=true;
-  if (e.code==="Space") { resetDirections(); sendDrive(0,0); }
+  if (e.code==="KeyA") state.head.left=true;
+  if (e.code==="KeyD") state.head.right=true;
+  if (e.code==="Space") { resetDirections(); resetHead(); sendDrive(0,0); sendHead(0); }
   applyDrive();
+  applyHead();
 });
 
 window.addEventListener("keyup", e => {
@@ -184,12 +223,17 @@ window.addEventListener("keyup", e => {
   if (e.code==="ArrowDown") state.directions.down=false;
   if (e.code==="ArrowLeft") state.directions.left=false;
   if (e.code==="ArrowRight") state.directions.right=false;
+  if (e.code==="KeyA") state.head.left=false;
+  if (e.code==="KeyD") state.head.right=false;
   applyDrive();
+  applyHead();
 });
 
 window.addEventListener("blur", () => {
   resetDirections();
+  resetHead();
   sendDrive(0,0);
+  sendHead(0);
 });
 
 // Messages from main process
@@ -233,4 +277,5 @@ ipcRenderer.on("boost:color", (_evt, msg) => {
 
 preventArrowKeyAdjust(ui.speed);
 preventArrowKeyAdjust(ui.steer);
+preventArrowKeyAdjust(ui.headSpeed);
 log("renderer.js załadowany OK");
