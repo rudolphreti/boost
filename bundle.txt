@@ -23,101 +23,254 @@ main.js
 import { app, BrowserWindow, ipcMain } from "electron";
 import { PoweredUP } from "node-poweredup";
 
-const LEFT_PORT = "A";
-const RIGHT_PORT = "B";
-
-let win;
+let win = null;
+let poweredUP = null;
 let hub = null;
+
 let leftMotor = null;
 let rightMotor = null;
 
-let lastL = 0;
-let lastR = 0;
+let colorDevice = null;
+let colorMode = null;
 
-function clamp100(x) {
-  return Math.max(-100, Math.min(100, x));
+const LEFT_PORT_DEFAULT = "A";
+const RIGHT_PORT_DEFAULT = "B";
+
+function sendLog(line) {
+  win?.webContents.send("ui:log", String(line));
 }
 
-function send(l, r) {
-  l = Math.trunc(clamp100(l));
-  r = Math.trunc(clamp100(r));
+function sendStatus(state, msg) {
+  win?.webContents.send("ui:status", { state, msg });
+}
 
-  if (leftMotor && l !== lastL) {
-    leftMotor.setPower(l);
-    lastL = l;
-  }
-  if (rightMotor && r !== lastR) {
-    rightMotor.setPower(r);
-    lastR = r;
-  }
+function createWindow() {
+  win = new BrowserWindow({
+    width: 980,
+    height: 720,
+    webPreferences: {
+      contextIsolation: false,
+      nodeIntegration: true
+    }
+  });
+  win.loadFile("index.html");
+}
+
+app.whenReady().then(createWindow);
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", async () => {
+  await disconnectBoost();
+});
+
+function safeStopScan() {
+  try { poweredUP?.stop?.(); } catch {}
+  try { poweredUP?.stopScanning?.(); } catch {}
+}
+
+function clearColorListeners() {
+  try { colorDevice?.removeAllListeners?.(); } catch {}
+}
+
+function attachHubDebugForwarding() {
+  if (!hub?.on) return;
+
+  try {
+    hub.removeAllListeners("portValue");
+  } catch {}
+
+  hub.on("portValue", (port, value) => {
+    win?.webContents.send("boost:raw", { port, value });
+  });
 }
 
 async function connectBoost() {
-  const poweredUP = new PoweredUP();
+  if (hub) return true;
 
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Hub not found")), 15000);
+  poweredUP = new PoweredUP();
 
-    poweredUP.on("discover", async (h) => {
+  return new Promise(async (resolve, reject) => {
+    const timeout = setTimeout(() => {
+      try { safeStopScan(); } catch {}
+      reject(new Error("BOOST not found (timeout)"));
+    }, 20000);
+
+    poweredUP.on("discover", async (discoveredHub) => {
       try {
         clearTimeout(timeout);
-        hub = h;
 
-        if (poweredUP.stopScanning) poweredUP.stopScanning();
-
+        hub = discoveredHub;
+        sendLog(`Discovered hub: ${hub.name || "(no-name)"}`);
+        sendStatus("connecting", "Łączę się z hubem...");
         await hub.connect();
-        leftMotor = await hub.waitForDeviceAtPort(LEFT_PORT);
-        rightMotor = await hub.waitForDeviceAtPort(RIGHT_PORT);
 
-        send(0, 0);
-        resolve();
+        safeStopScan();
+
+        attachHubDebugForwarding();
+
+        sendStatus("connecting", "Wykrywam urządzenia...");
+
+        const devices = hub.getDevices ? hub.getDevices() : [];
+        const simplified = (devices || []).map((d) => ({
+          portId: d?.portId ?? d?.port ?? d?.portID ?? null,
+          name: d?.name ?? "device",
+          type: d?.deviceType ?? d?.type ?? null
+        }));
+
+        win?.webContents.send("boost:devices", simplified);
+
+        // Motors (optional; if missing, driving just won't work)
+        try { leftMotor = await hub.waitForDeviceAtPort(LEFT_PORT_DEFAULT); } catch {}
+        try { rightMotor = await hub.waitForDeviceAtPort(RIGHT_PORT_DEFAULT); } catch {}
+
+        sendStatus("connected", "Połączony");
+        sendLog("Połączono OK");
+        resolve(true);
       } catch (e) {
         reject(e);
       }
     });
 
-    poweredUP.scan();
+    sendStatus("connecting", "Skanuję Bluetooth...");
+    await poweredUP.scan();
   });
 }
 
 async function disconnectBoost() {
   try {
-    send(0, 0);
-    leftMotor?.brake();
-    rightMotor?.brake();
+    if (colorDevice && colorMode && colorDevice.unsubscribe) {
+      await colorDevice.unsubscribe(colorMode);
+    }
   } catch {}
-  try {
-    await hub?.disconnect();
-  } catch {}
-  hub = null;
+
+  try { clearColorListeners(); } catch {}
+
+  try { await hub?.disconnect?.(); } catch {}
+
   leftMotor = null;
   rightMotor = null;
+  colorDevice = null;
+  colorMode = null;
+  hub = null;
+  poweredUP = null;
+
+  sendStatus("disconnected", "Rozłączony");
+  sendLog("Rozłączono");
 }
 
-function createWindow() {
-  win = new BrowserWindow({
-    width: 520,
-    height: 420,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
+async function drive(left, right) {
+  if (!hub || !leftMotor || !rightMotor) return;
+
+  const l = Math.max(-100, Math.min(100, Math.trunc(left)));
+  const r = Math.max(-100, Math.min(100, Math.trunc(right)));
+
+  await leftMotor.setPower(l);
+  await rightMotor.setPower(r);
+}
+
+function normalizePort(port) {
+  // Accept "A"/"B"/"C"/"D" or numeric ids like "0","1","2"... (from hub.getDevices())
+  if (port === null || port === undefined) return null;
+  const s = String(port).trim();
+  if (!s) return null;
+
+  const upper = s.toUpperCase();
+  if (["A", "B", "C", "D"].includes(upper)) return upper;
+
+  const n = Number(s);
+  if (Number.isFinite(n)) return n;
+
+  return s;
+}
+
+function colorCodeFromPayload(payload) {
+  // Try to extract a single numeric color code from different event shapes
+  if (payload === null || payload === undefined) return null;
+
+  if (typeof payload === "number") return payload;
+
+  if (typeof payload === "object") {
+    if (typeof payload.color === "number") return payload.color;
+    if (Array.isArray(payload) && typeof payload[0] === "number") return payload[0];
+
+    // Sometimes value could be { value: [color,...] } etc.
+    if (Array.isArray(payload.value) && typeof payload.value[0] === "number") return payload.value[0];
+    if (typeof payload.value === "number") return payload.value;
+  }
+
+  return null;
+}
+
+async function attachColorSensor(portInput, modeInput) {
+  if (!hub) throw new Error("Not connected");
+
+  const port = normalizePort(portInput);
+  const mode = String(modeInput || "color").trim();
+
+  if (!port && port !== 0) throw new Error("Port is empty");
+
+  // Detach previous
+  try {
+    if (colorDevice && colorMode && colorDevice.unsubscribe) {
+      await colorDevice.unsubscribe(colorMode);
     }
-  });
+  } catch {}
 
-  win.loadFile("index.html");
+  clearColorListeners();
+  colorDevice = null;
+  colorMode = null;
 
-  win.on("close", async (e) => {
-    e.preventDefault();
-    await disconnectBoost();
-    win.destroy();
-  });
+  sendLog(`waitForDeviceAtPort(${String(port)})...`);
+  const dev = await hub.waitForDeviceAtPort(port);
+
+  colorDevice = dev;
+  colorMode = mode;
+
+  // Forward any likely events to UI
+  const forward = (eventName, payload) => {
+    const code = colorCodeFromPayload(payload);
+    if (code !== null) {
+      win?.webContents.send("boost:color", { port, mode: eventName, color: code, raw: payload });
+    } else {
+      win?.webContents.send("boost:raw", { port, value: payload, eventName });
+    }
+  };
+
+  // Attach multiple listeners because different firmwares/devices report differently
+  try { dev.on("color", (p) => forward("color", p)); } catch {}
+  try { dev.on("colorAndDistance", (p) => forward("colorAndDistance", p)); } catch {}
+  try { dev.on("colorDistance", (p) => forward("colorDistance", p)); } catch {}
+  try { dev.on("portValue", (p) => forward("portValue", p)); } catch {}
+  try { dev.on("value", (p) => forward("value", p)); } catch {}
+  try { dev.on("data", (p) => forward("data", p)); } catch {}
+
+  // Some device implementations require setMode before subscribe
+  try { await dev.setMode?.(mode); } catch {}
+
+  if (dev.subscribe) {
+    sendLog(`subscribe(${mode})...`);
+    await dev.subscribe(mode);
+  } else {
+    throw new Error("Device has no subscribe()");
+  }
+
+  sendLog(`OK: czujnik aktywny na porcie ${String(port)} (mode=${mode}).`);
+  return true;
 }
 
-app.whenReady().then(createWindow);
-
+// IPC
 ipcMain.handle("boost:connect", async () => {
-  await connectBoost();
-  return { ok: true };
+  try {
+    await connectBoost();
+    return { ok: true };
+  } catch (e) {
+    sendStatus("error", String(e?.message || e));
+    sendLog(`ERROR connect: ${String(e?.message || e)}`);
+    return { ok: false, error: String(e?.message || e) };
+  }
 });
 
 ipcMain.handle("boost:disconnect", async () => {
@@ -125,9 +278,30 @@ ipcMain.handle("boost:disconnect", async () => {
   return { ok: true };
 });
 
-ipcMain.handle("boost:drive", async (_evt, payload) => {
-  send(payload.left, payload.right);
+ipcMain.handle("boost:drive", async (_evt, { left, right }) => {
+  await drive(left, right);
   return { ok: true };
+});
+
+ipcMain.handle("boost:colorAttach", async (_evt, { port, mode }) => {
+  try {
+    const ok = await attachColorSensor(port, mode);
+    return { ok };
+  } catch (e) {
+    sendStatus("error", String(e?.message || e));
+    sendLog(`ERROR colorAttach: ${String(e?.message || e)}`);
+    return { ok: false, error: String(e?.message || e) };
+  }
+});
+
+ipcMain.handle("boost:listDevices", async () => {
+  const devices = hub?.getDevices ? hub.getDevices() : [];
+  const simplified = (devices || []).map((d) => ({
+    portId: d?.portId ?? d?.port ?? d?.portID ?? null,
+    name: d?.name ?? "device",
+    type: d?.deviceType ?? d?.type ?? null
+  }));
+  return { ok: true, devices: simplified };
 });
 
 -----------------
@@ -141,42 +315,105 @@ index.html
   <title>LEGO BOOST Control</title>
   <style>
     body { font-family: Arial; padding: 16px; }
-    .row { margin: 10px 0; }
-    button { padding: 8px 14px; margin-right: 6px; }
+    .row { margin: 10px 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    button { padding: 8px 14px; }
     input[type=range] { width: 220px; }
+    select { padding: 6px 8px; }
     .mono { font-family: Consolas, monospace; }
+    #log { width: 100%; height: 260px; }
+    .box { padding: 10px; border: 1px solid #ddd; border-radius: 8px; }
+    .big { font-size: 22px; font-weight: 700; }
+    .muted { color: #555; }
   </style>
 </head>
 <body>
 
-<h2>LEGO BOOST – sterowanie</h2>
+<h2>LEGO BOOST – sterowanie + czujnik koloru</h2>
 
 <div class="row">
   <button id="connect">Połącz</button>
   <button id="disconnect">Rozłącz</button>
   <button id="stop">STOP</button>
+  <span class="mono">Status: <span id="status">rozłączony</span></span>
+</div>
+
+<div class="row box">
+  <div class="mono muted">Czujnik koloru</div>
+  <label class="mono">Port:</label>
+  <select id="colorPort">
+    <option value="C">C</option>
+    <option value="D">D</option>
+    <option value="A">A</option>
+    <option value="B">B</option>
+  </select>
+
+  <label class="mono">Tryb:</label>
+  <select id="colorMode">
+    <option value="color">color</option>
+    <option value="colorAndDistance">colorAndDistance</option>
+    <option value="colorDistance">colorDistance</option>
+  </select>
+
+  <button id="colorAttach">Aktywuj czujnik</button>
+  <button id="refreshDevices">Odśwież listę portów</button>
+</div>
+
+<div class="row box">
+  <div class="mono muted">Wykryty kolor</div>
+  <div class="big" id="colorName">—</div>
+  <div class="mono muted">Kod: <span id="colorCode">—</span></div>
+  <div class="mono muted">Źródło: <span id="colorSource">—</span></div>
+</div>
+
+<div class="row box">
+  <div class="mono muted">Czujnik pozycji (tilt/accel/gyro)</div>
+
+  <label class="mono">Port:</label>
+  <select id="posPort">
+    <option value="58">58</option>
+  </select>
+
+  <label class="mono">Tryb:</label>
+  <select id="posMode">
+    <option value="tilt">tilt</option>
+    <option value="acceleration">acceleration</option>
+    <option value="gyro">gyro</option>
+    <option value="orientation">orientation</option>
+  </select>
+
+  <button id="posAttach">Aktywuj czujnik</button>
+</div>
+
+<div class="row box">
+  <div class="mono muted">Pozycja</div>
+  <div class="big" id="posText">—</div>
+  <div class="mono muted">Źródło: <span id="posSource">—</span></div>
+</div>
+
+
+<div class="row box">
+  <div class="mono muted">Jazda</div>
+  <div>
+    Prędkość:
+    <input id="speed" type="range" min="5" max="80" value="25">
+    <span id="speedVal" class="mono">25</span>
+  </div>
+  <div>
+    Skręt:
+    <input id="steer" type="range" min="0" max="100" value="60">
+    <span id="steerVal" class="mono">0.60</span>
+  </div>
+  <div class="mono muted">
+    Sterowanie: ↑ ↓ ← → (keydown/keyup), Spacja = STOP
+  </div>
 </div>
 
 <div class="row">
-  Prędkość:
-  <input id="speed" type="range" min="5" max="80" value="25">
-  <span id="speedVal" class="mono">25</span>
+  <div style="width:100%">
+    <div class="mono muted">Log (w aplikacji, bez DevTools)</div>
+    <textarea id="log" class="mono" readonly></textarea>
+  </div>
 </div>
-
-<div class="row">
-  Skręt:
-  <input id="steer" type="range" min="0" max="100" value="60">
-  <span id="steerVal" class="mono">0.60</span>
-</div>
-
-<div class="row mono">
-  Status: <span id="status">rozłączony</span>
-</div>
-
-<p>
-Sterowanie: ↑ ↓ ← → (keydown/keyup)<br>
-Spacja = STOP
-</p>
 
 <script src="renderer.js"></script>
 </body>
@@ -189,30 +426,83 @@ renderer.js
 const { ipcRenderer } = window.require("electron");
 
 const statusEl = document.getElementById("status");
+const logEl = document.getElementById("log");
+
 const speedEl = document.getElementById("speed");
 const speedVal = document.getElementById("speedVal");
 const steerEl = document.getElementById("steer");
 const steerVal = document.getElementById("steerVal");
 
+const colorPortEl = document.getElementById("colorPort");
+const colorModeEl = document.getElementById("colorMode");
+const colorAttachBtn = document.getElementById("colorAttach");
+const refreshDevicesBtn = document.getElementById("refreshDevices");
+
+const colorNameEl = document.getElementById("colorName");
+const colorCodeEl = document.getElementById("colorCode");
+const colorSourceEl = document.getElementById("colorSource");
+
 let connected = false;
 let up=false, down=false, left=false, right=false;
 let lastL=0, lastR=0;
+
+const COLOR_PL = {
+  0: "Czarny",
+  3: "Niebieski",
+  5: "Zielony",
+  7: "Żółty",
+  9: "Czerwony",
+  10: "Biały"
+};
+
+let lastSpoken = null;
+let lastColorCode = null;
+
+function now() {
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${hh}:${mm}:${ss}`;
+}
+
+function log(line) {
+  logEl.value += `[${now()}] ${line}\n`;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setStatus(text) {
+  statusEl.textContent = text;
+}
+
+function speakPL(text) {
+  if (!text) return;
+
+  // Avoid repeating the same word nonstop when the sensor jitters
+  if (text === lastSpoken) return;
+  lastSpoken = text;
+
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = "pl-PL";
+  u.rate = 1.0;
+  window.speechSynthesis.speak(u);
+}
 
 function clamp100(x) {
   return Math.max(-100, Math.min(100, x));
 }
 
-function compute() {
+function computeDrive() {
   const speed = Number(speedEl.value);
   const steer = Number(steerEl.value) / 100;
 
-  let throttle = up ? 1 : down ? -1 : 0;
-  let s = left ? -1 : right ? 1 : 0;
+  const throttle = up ? 1 : down ? -1 : 0;
+  const s = left ? -1 : right ? 1 : 0;
 
-  // Turn-in-place when no throttle (so left/right works immediately)
   if (throttle === 0) {
     if (s === 0) return { left: 0, right: 0 };
-    const rot = Math.max(10, Math.trunc(speed)); // rotation power based on speed slider
+    const rot = Math.max(10, Math.trunc(speed));
     return { left: -s * rot, right: s * rot };
   }
 
@@ -223,8 +513,7 @@ function compute() {
   };
 }
 
-
-async function send(l, r) {
+async function sendDrive(l, r) {
   l = Math.trunc(l);
   r = Math.trunc(r);
   if (!connected) return;
@@ -233,38 +522,84 @@ async function send(l, r) {
   await ipcRenderer.invoke("boost:drive", { left: l, right: r });
 }
 
-function apply() {
-  const t = compute();
-  send(t.left, t.right);
+function applyDrive() {
+  const t = computeDrive();
+  sendDrive(t.left, t.right);
+}
+
+function updateColorUI(colorCode, source) {
+  const name = COLOR_PL[colorCode] || `Kod ${colorCode}`;
+  colorNameEl.textContent = name;
+  colorCodeEl.textContent = String(colorCode);
+  colorSourceEl.textContent = source || "—";
+
+  if (COLOR_PL[colorCode]) {
+    speakPL(name);
+  }
+}
+
+async function refreshDevices() {
+  const res = await ipcRenderer.invoke("boost:listDevices");
+  if (!res?.ok) return;
+
+  const devices = res.devices || [];
+  log(`Urządzenia (hub.getDevices): ${devices.length}`);
+
+  // Add numeric ports to dropdown (without duplicating existing)
+  const existing = new Set([...colorPortEl.options].map(o => o.value));
+
+  for (const d of devices) {
+    const pid = d.portId;
+    if (pid === null || pid === undefined) continue;
+    const val = String(pid);
+    if (existing.has(val)) continue;
+
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = `${val} (type=${d.type ?? "?"})`;
+    colorPortEl.appendChild(opt);
+    existing.add(val);
+  }
 }
 
 document.getElementById("connect").onclick = async () => {
-  statusEl.textContent = "łączenie...";
-  await ipcRenderer.invoke("boost:connect");
-  connected = true;
-  statusEl.textContent = "połączony";
+  log("Klik: Połącz");
+  setStatus("łączenie...");
+  const res = await ipcRenderer.invoke("boost:connect");
+  if (res?.ok) {
+    connected = true;
+    setStatus("połączony");
+    log("Połączono OK");
+    await refreshDevices();
+  } else {
+    connected = false;
+    setStatus("błąd");
+    log(`Błąd połączenia: ${res?.error || "?"}`);
+  }
 };
 
 document.getElementById("disconnect").onclick = async () => {
+  log("Klik: Rozłącz");
   await ipcRenderer.invoke("boost:disconnect");
   connected = false;
-  send(0,0);
-  statusEl.textContent = "rozłączony";
+  setStatus("rozłączony");
+  sendDrive(0,0);
 };
 
 document.getElementById("stop").onclick = () => {
+  log("Klik: STOP");
   up=down=left=right=false;
-  send(0,0);
+  sendDrive(0,0);
 };
 
 speedEl.oninput = () => {
   speedVal.textContent = speedEl.value;
-  apply();
+  applyDrive();
 };
 
 steerEl.oninput = () => {
   steerVal.textContent = (steerEl.value/100).toFixed(2);
-  apply();
+  applyDrive();
 };
 
 window.addEventListener("keydown", e => {
@@ -273,8 +608,8 @@ window.addEventListener("keydown", e => {
   if (e.code==="ArrowDown") down=true;
   if (e.code==="ArrowLeft") left=true;
   if (e.code==="ArrowRight") right=true;
-  if (e.code==="Space") { up=down=left=right=false; send(0,0); }
-  apply();
+  if (e.code==="Space") { up=down=left=right=false; sendDrive(0,0); }
+  applyDrive();
 });
 
 window.addEventListener("keyup", e => {
@@ -282,10 +617,136 @@ window.addEventListener("keyup", e => {
   if (e.code==="ArrowDown") down=false;
   if (e.code==="ArrowLeft") left=false;
   if (e.code==="ArrowRight") right=false;
-  apply();
+  applyDrive();
 });
 
 window.addEventListener("blur", () => {
   up=down=left=right=false;
-  send(0,0);
+  sendDrive(0,0);
+});
+
+colorAttachBtn.onclick = async () => {
+  const port = colorPortEl.value;
+  const mode = colorModeEl.value;
+
+  log(`Klik: Aktywuj czujnik -> port=${port} mode=${mode}`);
+  const res = await ipcRenderer.invoke("boost:colorAttach", { port, mode });
+
+  if (res?.ok) {
+    log(`OK: czujnik aktywny (port=${port}, mode=${mode}). Przyłóż klocek.`);
+    lastSpoken = null;
+    lastColorCode = null;
+    colorNameEl.textContent = "—";
+    colorCodeEl.textContent = "—";
+    colorSourceEl.textContent = `${port}/${mode}`;
+  } else {
+    log(`Błąd aktywacji czujnika: ${res?.error || "?"}`);
+  }
+};
+
+refreshDevicesBtn.onclick = async () => {
+  log("Klik: Odśwież listę portów");
+  await refreshDevices();
+};
+
+// Messages from main process
+ipcRenderer.on("ui:log", (_evt, line) => log(line));
+
+ipcRenderer.on("ui:status", (_evt, s) => {
+  if (!s) return;
+  if (s.state === "connecting") setStatus("łączenie...");
+  if (s.state === "connected") setStatus("połączony");
+  if (s.state === "disconnected") setStatus("rozłączony");
+  if (s.state === "error") setStatus("błąd");
+  if (s.msg) log(`STATUS: ${s.state} - ${s.msg}`);
+});
+
+ipcRenderer.on("boost:devices", (_evt, devices) => {
+  if (!devices) return;
+  log(`Połączono. Urządzenia widoczne:`);
+  for (const d of devices) {
+    log(`- port=${String(d.portId)} name=${d.name} type=${d.type}`);
+  }
+});
+
+ipcRenderer.on("boost:raw", (_evt, payload) => {
+  // This is only for debugging if the hub reports something but not color
+  if (!payload) return;
+  const p = payload.port !== undefined ? `port=${payload.port}` : "";
+  const ev = payload.eventName ? `event=${payload.eventName}` : "";
+  log(`RAW: ${p} ${ev} value=${JSON.stringify(payload.value ?? payload)}`);
+});
+
+ipcRenderer.on("boost:color", (_evt, msg) => {
+  if (!msg) return;
+  const code = msg.color;
+  const source = `${msg.port}/${msg.mode}`;
+
+  if (code === lastColorCode) return;
+  lastColorCode = code;
+
+  log(`COLOR: ${source} -> ${code} (${COLOR_PL[code] || "?"})`);
+  updateColorUI(code, source);
+});
+
+log("renderer.js załadowany OK");
+
+const posPortEl = document.getElementById("posPort");
+const posModeEl = document.getElementById("posMode");
+const posAttachBtn = document.getElementById("posAttach");
+const posTextEl = document.getElementById("posText");
+const posSourceEl = document.getElementById("posSource");
+
+let lastPosKey = null;
+
+function fmtPos(values) {
+  if (!Array.isArray(values)) return "—";
+  return values.map(v => Number(v).toFixed(0)).join(", ");
+}
+
+// w refreshDevices() dopisz też zasilanie dropdowna posPort:
+  const existingPos = new Set([...posPortEl.options].map(o => o.value));
+  for (const d of devices) {
+    const pid = d.portId;
+    if (pid === null || pid === undefined) continue;
+    const val = String(pid);
+    if (existingPos.has(val)) continue;
+
+    const opt = document.createElement("option");
+    opt.value = val;
+    opt.textContent = `${val} (type=${d.type ?? "?"})`;
+    posPortEl.appendChild(opt);
+    existingPos.add(val);
+  }
+
+// obsługa przycisku:
+posAttachBtn.onclick = async () => {
+  const port = posPortEl.value;
+  const mode = posModeEl.value;
+
+  log(`Klik: Aktywuj czujnik pozycji -> port=${port} mode=${mode}`);
+  const res = await ipcRenderer.invoke("boost:posAttach", { port, mode });
+
+  if (res?.ok) {
+    log(`OK: czujnik pozycji aktywny (port=${port}, mode=${mode}). Porusz hubem.`);
+    lastPosKey = null;
+    posTextEl.textContent = "—";
+    posSourceEl.textContent = `${port}/${mode}`;
+  } else {
+    log(`Błąd aktywacji czujnika pozycji: ${res?.error || "?"}`);
+  }
+};
+
+// odbiór danych z main:
+ipcRenderer.on("boost:pos", (_evt, msg) => {
+  if (!msg) return;
+
+  const source = `${msg.port}/${msg.mode}`;
+  const key = `${source}:${JSON.stringify(msg.values)}`;
+  if (key === lastPosKey) return;
+  lastPosKey = key;
+
+  log(`POS: ${source} -> [${fmtPos(msg.values)}]`);
+  posTextEl.textContent = fmtPos(msg.values);
+  posSourceEl.textContent = source;
 });

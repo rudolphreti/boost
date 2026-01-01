@@ -1,101 +1,254 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import { PoweredUP } from "node-poweredup";
 
-const LEFT_PORT = "A";
-const RIGHT_PORT = "B";
-
-let win;
+let win = null;
+let poweredUP = null;
 let hub = null;
+
 let leftMotor = null;
 let rightMotor = null;
 
-let lastL = 0;
-let lastR = 0;
+let colorDevice = null;
+let colorMode = null;
 
-function clamp100(x) {
-  return Math.max(-100, Math.min(100, x));
+const LEFT_PORT_DEFAULT = "A";
+const RIGHT_PORT_DEFAULT = "B";
+
+function sendLog(line) {
+  win?.webContents.send("ui:log", String(line));
 }
 
-function send(l, r) {
-  l = Math.trunc(clamp100(l));
-  r = Math.trunc(clamp100(r));
+function sendStatus(state, msg) {
+  win?.webContents.send("ui:status", { state, msg });
+}
 
-  if (leftMotor && l !== lastL) {
-    leftMotor.setPower(l);
-    lastL = l;
-  }
-  if (rightMotor && r !== lastR) {
-    rightMotor.setPower(r);
-    lastR = r;
-  }
+function createWindow() {
+  win = new BrowserWindow({
+    width: 980,
+    height: 720,
+    webPreferences: {
+      contextIsolation: false,
+      nodeIntegration: true
+    }
+  });
+  win.loadFile("index.html");
+}
+
+app.whenReady().then(createWindow);
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") app.quit();
+});
+
+app.on("before-quit", async () => {
+  await disconnectBoost();
+});
+
+function safeStopScan() {
+  try { poweredUP?.stop?.(); } catch {}
+  try { poweredUP?.stopScanning?.(); } catch {}
+}
+
+function clearColorListeners() {
+  try { colorDevice?.removeAllListeners?.(); } catch {}
+}
+
+function attachHubDebugForwarding() {
+  if (!hub?.on) return;
+
+  try {
+    hub.removeAllListeners("portValue");
+  } catch {}
+
+  hub.on("portValue", (port, value) => {
+    win?.webContents.send("boost:raw", { port, value });
+  });
 }
 
 async function connectBoost() {
-  const poweredUP = new PoweredUP();
+  if (hub) return true;
 
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error("Hub not found")), 15000);
+  poweredUP = new PoweredUP();
 
-    poweredUP.on("discover", async (h) => {
+  return new Promise(async (resolve, reject) => {
+    const timeout = setTimeout(() => {
+      try { safeStopScan(); } catch {}
+      reject(new Error("BOOST not found (timeout)"));
+    }, 20000);
+
+    poweredUP.on("discover", async (discoveredHub) => {
       try {
         clearTimeout(timeout);
-        hub = h;
 
-        if (poweredUP.stopScanning) poweredUP.stopScanning();
-
+        hub = discoveredHub;
+        sendLog(`Discovered hub: ${hub.name || "(no-name)"}`);
+        sendStatus("connecting", "Łączę się z hubem...");
         await hub.connect();
-        leftMotor = await hub.waitForDeviceAtPort(LEFT_PORT);
-        rightMotor = await hub.waitForDeviceAtPort(RIGHT_PORT);
 
-        send(0, 0);
-        resolve();
+        safeStopScan();
+
+        attachHubDebugForwarding();
+
+        sendStatus("connecting", "Wykrywam urządzenia...");
+
+        const devices = hub.getDevices ? hub.getDevices() : [];
+        const simplified = (devices || []).map((d) => ({
+          portId: d?.portId ?? d?.port ?? d?.portID ?? null,
+          name: d?.name ?? "device",
+          type: d?.deviceType ?? d?.type ?? null
+        }));
+
+        win?.webContents.send("boost:devices", simplified);
+
+        // Motors (optional; if missing, driving just won't work)
+        try { leftMotor = await hub.waitForDeviceAtPort(LEFT_PORT_DEFAULT); } catch {}
+        try { rightMotor = await hub.waitForDeviceAtPort(RIGHT_PORT_DEFAULT); } catch {}
+
+        sendStatus("connected", "Połączony");
+        sendLog("Połączono OK");
+        resolve(true);
       } catch (e) {
         reject(e);
       }
     });
 
-    poweredUP.scan();
+    sendStatus("connecting", "Skanuję Bluetooth...");
+    await poweredUP.scan();
   });
 }
 
 async function disconnectBoost() {
   try {
-    send(0, 0);
-    leftMotor?.brake();
-    rightMotor?.brake();
+    if (colorDevice && colorMode && colorDevice.unsubscribe) {
+      await colorDevice.unsubscribe(colorMode);
+    }
   } catch {}
-  try {
-    await hub?.disconnect();
-  } catch {}
-  hub = null;
+
+  try { clearColorListeners(); } catch {}
+
+  try { await hub?.disconnect?.(); } catch {}
+
   leftMotor = null;
   rightMotor = null;
+  colorDevice = null;
+  colorMode = null;
+  hub = null;
+  poweredUP = null;
+
+  sendStatus("disconnected", "Rozłączony");
+  sendLog("Rozłączono");
 }
 
-function createWindow() {
-  win = new BrowserWindow({
-    width: 520,
-    height: 420,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false
+async function drive(left, right) {
+  if (!hub || !leftMotor || !rightMotor) return;
+
+  const l = Math.max(-100, Math.min(100, Math.trunc(left)));
+  const r = Math.max(-100, Math.min(100, Math.trunc(right)));
+
+  await leftMotor.setPower(l);
+  await rightMotor.setPower(r);
+}
+
+function normalizePort(port) {
+  // Accept "A"/"B"/"C"/"D" or numeric ids like "0","1","2"... (from hub.getDevices())
+  if (port === null || port === undefined) return null;
+  const s = String(port).trim();
+  if (!s) return null;
+
+  const upper = s.toUpperCase();
+  if (["A", "B", "C", "D"].includes(upper)) return upper;
+
+  const n = Number(s);
+  if (Number.isFinite(n)) return n;
+
+  return s;
+}
+
+function colorCodeFromPayload(payload) {
+  // Try to extract a single numeric color code from different event shapes
+  if (payload === null || payload === undefined) return null;
+
+  if (typeof payload === "number") return payload;
+
+  if (typeof payload === "object") {
+    if (typeof payload.color === "number") return payload.color;
+    if (Array.isArray(payload) && typeof payload[0] === "number") return payload[0];
+
+    // Sometimes value could be { value: [color,...] } etc.
+    if (Array.isArray(payload.value) && typeof payload.value[0] === "number") return payload.value[0];
+    if (typeof payload.value === "number") return payload.value;
+  }
+
+  return null;
+}
+
+async function attachColorSensor(portInput, modeInput) {
+  if (!hub) throw new Error("Not connected");
+
+  const port = normalizePort(portInput);
+  const mode = String(modeInput || "color").trim();
+
+  if (!port && port !== 0) throw new Error("Port is empty");
+
+  // Detach previous
+  try {
+    if (colorDevice && colorMode && colorDevice.unsubscribe) {
+      await colorDevice.unsubscribe(colorMode);
     }
-  });
+  } catch {}
 
-  win.loadFile("index.html");
+  clearColorListeners();
+  colorDevice = null;
+  colorMode = null;
 
-  win.on("close", async (e) => {
-    e.preventDefault();
-    await disconnectBoost();
-    win.destroy();
-  });
+  sendLog(`waitForDeviceAtPort(${String(port)})...`);
+  const dev = await hub.waitForDeviceAtPort(port);
+
+  colorDevice = dev;
+  colorMode = mode;
+
+  // Forward any likely events to UI
+  const forward = (eventName, payload) => {
+    const code = colorCodeFromPayload(payload);
+    if (code !== null) {
+      win?.webContents.send("boost:color", { port, mode: eventName, color: code, raw: payload });
+    } else {
+      win?.webContents.send("boost:raw", { port, value: payload, eventName });
+    }
+  };
+
+  // Attach multiple listeners because different firmwares/devices report differently
+  try { dev.on("color", (p) => forward("color", p)); } catch {}
+  try { dev.on("colorAndDistance", (p) => forward("colorAndDistance", p)); } catch {}
+  try { dev.on("colorDistance", (p) => forward("colorDistance", p)); } catch {}
+  try { dev.on("portValue", (p) => forward("portValue", p)); } catch {}
+  try { dev.on("value", (p) => forward("value", p)); } catch {}
+  try { dev.on("data", (p) => forward("data", p)); } catch {}
+
+  // Some device implementations require setMode before subscribe
+  try { await dev.setMode?.(mode); } catch {}
+
+  if (dev.subscribe) {
+    sendLog(`subscribe(${mode})...`);
+    await dev.subscribe(mode);
+  } else {
+    throw new Error("Device has no subscribe()");
+  }
+
+  sendLog(`OK: czujnik aktywny na porcie ${String(port)} (mode=${mode}).`);
+  return true;
 }
 
-app.whenReady().then(createWindow);
-
+// IPC
 ipcMain.handle("boost:connect", async () => {
-  await connectBoost();
-  return { ok: true };
+  try {
+    await connectBoost();
+    return { ok: true };
+  } catch (e) {
+    sendStatus("error", String(e?.message || e));
+    sendLog(`ERROR connect: ${String(e?.message || e)}`);
+    return { ok: false, error: String(e?.message || e) };
+  }
 });
 
 ipcMain.handle("boost:disconnect", async () => {
@@ -103,7 +256,28 @@ ipcMain.handle("boost:disconnect", async () => {
   return { ok: true };
 });
 
-ipcMain.handle("boost:drive", async (_evt, payload) => {
-  send(payload.left, payload.right);
+ipcMain.handle("boost:drive", async (_evt, { left, right }) => {
+  await drive(left, right);
   return { ok: true };
+});
+
+ipcMain.handle("boost:colorAttach", async (_evt, { port, mode }) => {
+  try {
+    const ok = await attachColorSensor(port, mode);
+    return { ok };
+  } catch (e) {
+    sendStatus("error", String(e?.message || e));
+    sendLog(`ERROR colorAttach: ${String(e?.message || e)}`);
+    return { ok: false, error: String(e?.message || e) };
+  }
+});
+
+ipcMain.handle("boost:listDevices", async () => {
+  const devices = hub?.getDevices ? hub.getDevices() : [];
+  const simplified = (devices || []).map((d) => ({
+    portId: d?.portId ?? d?.port ?? d?.portID ?? null,
+    name: d?.name ?? "device",
+    type: d?.deviceType ?? d?.type ?? null
+  }));
+  return { ok: true, devices: simplified };
 });

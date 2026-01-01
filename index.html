@@ -5,42 +5,79 @@
   <title>LEGO BOOST Control</title>
   <style>
     body { font-family: Arial; padding: 16px; }
-    .row { margin: 10px 0; }
-    button { padding: 8px 14px; margin-right: 6px; }
+    .row { margin: 10px 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    button { padding: 8px 14px; }
     input[type=range] { width: 220px; }
+    select { padding: 6px 8px; }
     .mono { font-family: Consolas, monospace; }
+    #log { width: 100%; height: 260px; }
+    .box { padding: 10px; border: 1px solid #ddd; border-radius: 8px; }
+    .big { font-size: 22px; font-weight: 700; }
+    .muted { color: #555; }
   </style>
 </head>
 <body>
 
-<h2>LEGO BOOST – sterowanie</h2>
+<h2>LEGO BOOST – sterowanie + czujnik koloru</h2>
 
 <div class="row">
   <button id="connect">Połącz</button>
   <button id="disconnect">Rozłącz</button>
   <button id="stop">STOP</button>
+  <span class="mono">Status: <span id="status">rozłączony</span></span>
+</div>
+
+<div class="row box">
+  <div class="mono muted">Czujnik koloru</div>
+  <label class="mono">Port:</label>
+  <select id="colorPort">
+    <option value="C">C</option>
+    <option value="D">D</option>
+    <option value="A">A</option>
+    <option value="B">B</option>
+  </select>
+
+  <label class="mono">Tryb:</label>
+  <select id="colorMode">
+    <option value="color">color</option>
+    <option value="colorAndDistance">colorAndDistance</option>
+    <option value="colorDistance">colorDistance</option>
+  </select>
+
+  <button id="colorAttach">Aktywuj czujnik</button>
+  <button id="refreshDevices">Odśwież listę portów</button>
+</div>
+
+<div class="row box">
+  <div class="mono muted">Wykryty kolor</div>
+  <div class="big" id="colorName">—</div>
+  <div class="mono muted">Kod: <span id="colorCode">—</span></div>
+  <div class="mono muted">Źródło: <span id="colorSource">—</span></div>
+</div>z
+
+<div class="row box">
+  <div class="mono muted">Jazda</div>
+  <div>
+    Prędkość:
+    <input id="speed" type="range" min="5" max="80" value="25">
+    <span id="speedVal" class="mono">25</span>
+  </div>
+  <div>
+    Skręt:
+    <input id="steer" type="range" min="0" max="100" value="60">
+    <span id="steerVal" class="mono">0.60</span>
+  </div>
+  <div class="mono muted">
+    Sterowanie: ↑ ↓ ← → (keydown/keyup), Spacja = STOP
+  </div>
 </div>
 
 <div class="row">
-  Prędkość:
-  <input id="speed" type="range" min="5" max="80" value="25">
-  <span id="speedVal" class="mono">25</span>
+  <div style="width:100%">
+    <div class="mono muted">Log (w aplikacji, bez DevTools)</div>
+    <textarea id="log" class="mono" readonly></textarea>
+  </div>
 </div>
-
-<div class="row">
-  Skręt:
-  <input id="steer" type="range" min="0" max="100" value="60">
-  <span id="steerVal" class="mono">0.60</span>
-</div>
-
-<div class="row mono">
-  Status: <span id="status">rozłączony</span>
-</div>
-
-<p>
-Sterowanie: ↑ ↓ ← → (keydown/keyup)<br>
-Spacja = STOP
-</p>
 
 <script src="renderer.js"></script>
 </body>
