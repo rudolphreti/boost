@@ -32,6 +32,7 @@ let rightMotor = null;
 
 let colorDevice = null;
 let colorMode = null;
+let colorModeName = null;
 
 const LEFT_PORT_DEFAULT = "A";
 const RIGHT_PORT_DEFAULT = "B";
@@ -204,11 +205,42 @@ function colorCodeFromPayload(payload) {
   return null;
 }
 
+function resolveColorMode(device, modeInput) {
+  const raw = modeInput === undefined || modeInput === null ? "" : modeInput;
+  const str = String(raw).trim();
+
+  // If the mode is already numeric, use it directly (Node will coerce strings to numbers, but let's be explicit)
+  const maybeNumber = Number(str);
+  if (Number.isFinite(maybeNumber)) return maybeNumber;
+
+  const modeMap = device?._modeMap || device?.modeMap || {};
+
+  if (str && modeMap[str] !== undefined) return modeMap[str];
+
+  // Accept a common typo used in the UI: "colorDistance" should map to "colorAndDistance"
+  if (str === "colorDistance" && modeMap.colorAndDistance !== undefined) {
+    return modeMap.colorAndDistance;
+  }
+
+  // Fallback to plain color mode if available
+  if (modeMap.color !== undefined) return modeMap.color;
+
+  return null;
+}
+
+function resolveColorModeName(device, modeId) {
+  const modeMap = device?._modeMap || device?.modeMap || {};
+  for (const [name, id] of Object.entries(modeMap)) {
+    if (id === modeId) return name;
+  }
+  return null;
+}
+
 async function attachColorSensor(portInput, modeInput) {
   if (!hub) throw new Error("Not connected");
 
   const port = normalizePort(portInput);
-  const mode = String(modeInput || "color").trim();
+  const requestedModeName = String(modeInput || "color").trim();
 
   if (!port && port !== 0) throw new Error("Port is empty");
 
@@ -222,12 +254,19 @@ async function attachColorSensor(portInput, modeInput) {
   clearColorListeners();
   colorDevice = null;
   colorMode = null;
+  colorModeName = null;
 
   sendLog(`waitForDeviceAtPort(${String(port)})...`);
   const dev = await hub.waitForDeviceAtPort(port);
 
   colorDevice = dev;
-  colorMode = mode;
+
+  const resolvedMode = resolveColorMode(dev, requestedModeName);
+  if (resolvedMode === null) {
+    throw new Error(`Nieznany tryb czujnika: "${requestedModeName}"`);
+  }
+  colorMode = resolvedMode;
+  colorModeName = resolveColorModeName(dev, resolvedMode) || requestedModeName;
 
   // Forward any likely events to UI
   const forward = (eventName, payload) => {
@@ -248,17 +287,17 @@ async function attachColorSensor(portInput, modeInput) {
   try { dev.on("data", (p) => forward("data", p)); } catch {}
 
   // Some device implementations require setMode before subscribe
-  try { await dev.setMode?.(mode); } catch {}
+  try { await dev.setMode?.(resolvedMode); } catch {}
 
   if (dev.subscribe) {
-    sendLog(`subscribe(${mode})...`);
-    await dev.subscribe(mode);
+    sendLog(`subscribe(${colorModeName} -> mode ${resolvedMode})...`);
+    await dev.subscribe(resolvedMode);
   } else {
     throw new Error("Device has no subscribe()");
   }
 
-  sendLog(`OK: czujnik aktywny na porcie ${String(port)} (mode=${mode}).`);
-  return true;
+  sendLog(`OK: czujnik aktywny na porcie ${String(port)} (mode=${colorModeName}/${resolvedMode}).`);
+  return { mode: colorModeName, modeId: resolvedMode };
 }
 
 // IPC
@@ -285,8 +324,8 @@ ipcMain.handle("boost:drive", async (_evt, { left, right }) => {
 
 ipcMain.handle("boost:colorAttach", async (_evt, { port, mode }) => {
   try {
-    const ok = await attachColorSensor(port, mode);
-    return { ok };
+    const result = await attachColorSensor(port, mode);
+    return { ok: true, mode: result?.mode, modeId: result?.modeId };
   } catch (e) {
     sendStatus("error", String(e?.message || e));
     sendLog(`ERROR colorAttach: ${String(e?.message || e)}`);
@@ -363,33 +402,7 @@ index.html
   <div class="big" id="colorName">—</div>
   <div class="mono muted">Kod: <span id="colorCode">—</span></div>
   <div class="mono muted">Źródło: <span id="colorSource">—</span></div>
-</div>
-
-<div class="row box">
-  <div class="mono muted">Czujnik pozycji (tilt/accel/gyro)</div>
-
-  <label class="mono">Port:</label>
-  <select id="posPort">
-    <option value="58">58</option>
-  </select>
-
-  <label class="mono">Tryb:</label>
-  <select id="posMode">
-    <option value="tilt">tilt</option>
-    <option value="acceleration">acceleration</option>
-    <option value="gyro">gyro</option>
-    <option value="orientation">orientation</option>
-  </select>
-
-  <button id="posAttach">Aktywuj czujnik</button>
-</div>
-
-<div class="row box">
-  <div class="mono muted">Pozycja</div>
-  <div class="big" id="posText">—</div>
-  <div class="mono muted">Źródło: <span id="posSource">—</span></div>
-</div>
-
+</div>z
 
 <div class="row box">
   <div class="mono muted">Jazda</div>
@@ -633,12 +646,14 @@ colorAttachBtn.onclick = async () => {
   const res = await ipcRenderer.invoke("boost:colorAttach", { port, mode });
 
   if (res?.ok) {
-    log(`OK: czujnik aktywny (port=${port}, mode=${mode}). Przyłóż klocek.`);
+    const activeMode = res.mode || mode;
+    const activeModeId = res.modeId !== undefined ? `id=${res.modeId}` : "";
+    log(`OK: czujnik aktywny (port=${port}, mode=${activeMode} ${activeModeId}). Przyłóż klocek.`);
     lastSpoken = null;
     lastColorCode = null;
     colorNameEl.textContent = "—";
     colorCodeEl.textContent = "—";
-    colorSourceEl.textContent = `${port}/${mode}`;
+    colorSourceEl.textContent = `${port}/${activeMode}`;
   } else {
     log(`Błąd aktywacji czujnika: ${res?.error || "?"}`);
   }
@@ -690,63 +705,3 @@ ipcRenderer.on("boost:color", (_evt, msg) => {
 });
 
 log("renderer.js załadowany OK");
-
-const posPortEl = document.getElementById("posPort");
-const posModeEl = document.getElementById("posMode");
-const posAttachBtn = document.getElementById("posAttach");
-const posTextEl = document.getElementById("posText");
-const posSourceEl = document.getElementById("posSource");
-
-let lastPosKey = null;
-
-function fmtPos(values) {
-  if (!Array.isArray(values)) return "—";
-  return values.map(v => Number(v).toFixed(0)).join(", ");
-}
-
-// w refreshDevices() dopisz też zasilanie dropdowna posPort:
-  const existingPos = new Set([...posPortEl.options].map(o => o.value));
-  for (const d of devices) {
-    const pid = d.portId;
-    if (pid === null || pid === undefined) continue;
-    const val = String(pid);
-    if (existingPos.has(val)) continue;
-
-    const opt = document.createElement("option");
-    opt.value = val;
-    opt.textContent = `${val} (type=${d.type ?? "?"})`;
-    posPortEl.appendChild(opt);
-    existingPos.add(val);
-  }
-
-// obsługa przycisku:
-posAttachBtn.onclick = async () => {
-  const port = posPortEl.value;
-  const mode = posModeEl.value;
-
-  log(`Klik: Aktywuj czujnik pozycji -> port=${port} mode=${mode}`);
-  const res = await ipcRenderer.invoke("boost:posAttach", { port, mode });
-
-  if (res?.ok) {
-    log(`OK: czujnik pozycji aktywny (port=${port}, mode=${mode}). Porusz hubem.`);
-    lastPosKey = null;
-    posTextEl.textContent = "—";
-    posSourceEl.textContent = `${port}/${mode}`;
-  } else {
-    log(`Błąd aktywacji czujnika pozycji: ${res?.error || "?"}`);
-  }
-};
-
-// odbiór danych z main:
-ipcRenderer.on("boost:pos", (_evt, msg) => {
-  if (!msg) return;
-
-  const source = `${msg.port}/${msg.mode}`;
-  const key = `${source}:${JSON.stringify(msg.values)}`;
-  if (key === lastPosKey) return;
-  lastPosKey = key;
-
-  log(`POS: ${source} -> [${fmtPos(msg.values)}]`);
-  posTextEl.textContent = fmtPos(msg.values);
-  posSourceEl.textContent = source;
-});
