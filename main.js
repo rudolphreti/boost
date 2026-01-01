@@ -10,6 +10,7 @@ let rightMotor = null;
 
 let colorDevice = null;
 let colorMode = null;
+let colorModeName = null;
 
 const LEFT_PORT_DEFAULT = "A";
 const RIGHT_PORT_DEFAULT = "B";
@@ -182,11 +183,42 @@ function colorCodeFromPayload(payload) {
   return null;
 }
 
+function resolveColorMode(device, modeInput) {
+  const raw = modeInput === undefined || modeInput === null ? "" : modeInput;
+  const str = String(raw).trim();
+
+  // If the mode is already numeric, use it directly (Node will coerce strings to numbers, but let's be explicit)
+  const maybeNumber = Number(str);
+  if (Number.isFinite(maybeNumber)) return maybeNumber;
+
+  const modeMap = device?._modeMap || device?.modeMap || {};
+
+  if (str && modeMap[str] !== undefined) return modeMap[str];
+
+  // Accept a common typo used in the UI: "colorDistance" should map to "colorAndDistance"
+  if (str === "colorDistance" && modeMap.colorAndDistance !== undefined) {
+    return modeMap.colorAndDistance;
+  }
+
+  // Fallback to plain color mode if available
+  if (modeMap.color !== undefined) return modeMap.color;
+
+  return null;
+}
+
+function resolveColorModeName(device, modeId) {
+  const modeMap = device?._modeMap || device?.modeMap || {};
+  for (const [name, id] of Object.entries(modeMap)) {
+    if (id === modeId) return name;
+  }
+  return null;
+}
+
 async function attachColorSensor(portInput, modeInput) {
   if (!hub) throw new Error("Not connected");
 
   const port = normalizePort(portInput);
-  const mode = String(modeInput || "color").trim();
+  const requestedModeName = String(modeInput || "color").trim();
 
   if (!port && port !== 0) throw new Error("Port is empty");
 
@@ -200,12 +232,19 @@ async function attachColorSensor(portInput, modeInput) {
   clearColorListeners();
   colorDevice = null;
   colorMode = null;
+  colorModeName = null;
 
   sendLog(`waitForDeviceAtPort(${String(port)})...`);
   const dev = await hub.waitForDeviceAtPort(port);
 
   colorDevice = dev;
-  colorMode = mode;
+
+  const resolvedMode = resolveColorMode(dev, requestedModeName);
+  if (resolvedMode === null) {
+    throw new Error(`Nieznany tryb czujnika: "${requestedModeName}"`);
+  }
+  colorMode = resolvedMode;
+  colorModeName = resolveColorModeName(dev, resolvedMode) || requestedModeName;
 
   // Forward any likely events to UI
   const forward = (eventName, payload) => {
@@ -226,17 +265,17 @@ async function attachColorSensor(portInput, modeInput) {
   try { dev.on("data", (p) => forward("data", p)); } catch {}
 
   // Some device implementations require setMode before subscribe
-  try { await dev.setMode?.(mode); } catch {}
+  try { await dev.setMode?.(resolvedMode); } catch {}
 
   if (dev.subscribe) {
-    sendLog(`subscribe(${mode})...`);
-    await dev.subscribe(mode);
+    sendLog(`subscribe(${colorModeName} -> mode ${resolvedMode})...`);
+    await dev.subscribe(resolvedMode);
   } else {
     throw new Error("Device has no subscribe()");
   }
 
-  sendLog(`OK: czujnik aktywny na porcie ${String(port)} (mode=${mode}).`);
-  return true;
+  sendLog(`OK: czujnik aktywny na porcie ${String(port)} (mode=${colorModeName}/${resolvedMode}).`);
+  return { mode: colorModeName, modeId: resolvedMode };
 }
 
 // IPC
@@ -263,8 +302,8 @@ ipcMain.handle("boost:drive", async (_evt, { left, right }) => {
 
 ipcMain.handle("boost:colorAttach", async (_evt, { port, mode }) => {
   try {
-    const ok = await attachColorSensor(port, mode);
-    return { ok };
+    const result = await attachColorSensor(port, mode);
+    return { ok: true, mode: result?.mode, modeId: result?.modeId };
   } catch (e) {
     sendStatus("error", String(e?.message || e));
     sendLog(`ERROR colorAttach: ${String(e?.message || e)}`);

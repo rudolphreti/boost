@@ -208,12 +208,14 @@ colorAttachBtn.onclick = async () => {
   const res = await ipcRenderer.invoke("boost:colorAttach", { port, mode });
 
   if (res?.ok) {
-    log(`OK: czujnik aktywny (port=${port}, mode=${mode}). Przyłóż klocek.`);
+    const activeMode = res.mode || mode;
+    const activeModeId = res.modeId !== undefined ? `id=${res.modeId}` : "";
+    log(`OK: czujnik aktywny (port=${port}, mode=${activeMode} ${activeModeId}). Przyłóż klocek.`);
     lastSpoken = null;
     lastColorCode = null;
     colorNameEl.textContent = "—";
     colorCodeEl.textContent = "—";
-    colorSourceEl.textContent = `${port}/${mode}`;
+    colorSourceEl.textContent = `${port}/${activeMode}`;
   } else {
     log(`Błąd aktywacji czujnika: ${res?.error || "?"}`);
   }
