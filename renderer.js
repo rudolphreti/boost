@@ -1,25 +1,28 @@
 const { ipcRenderer } = window.require("electron");
 
-const statusEl = document.getElementById("status");
-const logEl = document.getElementById("log");
+const ui = {
+  status: document.getElementById("status"),
+  log: document.getElementById("log"),
+  speed: document.getElementById("speed"),
+  speedVal: document.getElementById("speedVal"),
+  steer: document.getElementById("steer"),
+  steerVal: document.getElementById("steerVal"),
+  colorPort: document.getElementById("colorPort"),
+  colorMode: document.getElementById("colorMode"),
+  colorAttachBtn: document.getElementById("colorAttach"),
+  refreshDevicesBtn: document.getElementById("refreshDevices"),
+  colorName: document.getElementById("colorName"),
+  colorCode: document.getElementById("colorCode"),
+  colorSource: document.getElementById("colorSource")
+};
 
-const speedEl = document.getElementById("speed");
-const speedVal = document.getElementById("speedVal");
-const steerEl = document.getElementById("steer");
-const steerVal = document.getElementById("steerVal");
-
-const colorPortEl = document.getElementById("colorPort");
-const colorModeEl = document.getElementById("colorMode");
-const colorAttachBtn = document.getElementById("colorAttach");
-const refreshDevicesBtn = document.getElementById("refreshDevices");
-
-const colorNameEl = document.getElementById("colorName");
-const colorCodeEl = document.getElementById("colorCode");
-const colorSourceEl = document.getElementById("colorSource");
-
-let connected = false;
-let up=false, down=false, left=false, right=false;
-let lastL=0, lastR=0;
+const state = {
+  connected: false,
+  directions: { up: false, down: false, left: false, right: false },
+  lastDrive: { left: 0, right: 0 },
+  lastSpoken: null,
+  lastColorCode: null
+};
 
 const COLOR_PL = {
   0: "Czarny",
@@ -30,9 +33,6 @@ const COLOR_PL = {
   10: "Biały"
 };
 
-let lastSpoken = null;
-let lastColorCode = null;
-
 function now() {
   const d = new Date();
   const hh = String(d.getHours()).padStart(2, "0");
@@ -42,20 +42,24 @@ function now() {
 }
 
 function log(line) {
-  logEl.value += `[${now()}] ${line}\n`;
-  logEl.scrollTop = logEl.scrollHeight;
+  ui.log.value += `[${now()}] ${line}\n`;
+  ui.log.scrollTop = ui.log.scrollHeight;
 }
 
 function setStatus(text) {
-  statusEl.textContent = text;
+  ui.status.textContent = text;
+}
+
+function setConnected(isConnected) {
+  state.connected = Boolean(isConnected);
 }
 
 function speakPL(text) {
   if (!text) return;
 
   // Avoid repeating the same word nonstop when the sensor jitters
-  if (text === lastSpoken) return;
-  lastSpoken = text;
+  if (text === state.lastSpoken) return;
+  state.lastSpoken = text;
 
   window.speechSynthesis.cancel();
   const u = new SpeechSynthesisUtterance(text);
@@ -69,11 +73,11 @@ function clamp100(x) {
 }
 
 function computeDrive() {
-  const speed = Number(speedEl.value);
-  const steer = Number(steerEl.value) / 100;
+  const speed = Number(ui.speed.value);
+  const steer = Number(ui.steer.value) / 100;
 
-  const throttle = up ? 1 : down ? -1 : 0;
-  const s = left ? -1 : right ? 1 : 0;
+  const throttle = state.directions.up ? 1 : state.directions.down ? -1 : 0;
+  const s = state.directions.left ? -1 : state.directions.right ? 1 : 0;
 
   if (throttle === 0) {
     if (s === 0) return { left: 0, right: 0 };
@@ -91,9 +95,9 @@ function computeDrive() {
 async function sendDrive(l, r) {
   l = Math.trunc(l);
   r = Math.trunc(r);
-  if (!connected) return;
-  if (l === lastL && r === lastR) return;
-  lastL = l; lastR = r;
+  if (!state.connected) return;
+  if (l === state.lastDrive.left && r === state.lastDrive.right) return;
+  state.lastDrive = { left: l, right: r };
   await ipcRenderer.invoke("boost:drive", { left: l, right: r });
 }
 
@@ -104,9 +108,9 @@ function applyDrive() {
 
 function updateColorUI(colorCode, source) {
   const name = COLOR_PL[colorCode] || `Kod ${colorCode}`;
-  colorNameEl.textContent = name;
-  colorCodeEl.textContent = String(colorCode);
-  colorSourceEl.textContent = source || "—";
+  ui.colorName.textContent = name;
+  ui.colorCode.textContent = String(colorCode);
+  ui.colorSource.textContent = source || "—";
 
   if (COLOR_PL[colorCode]) {
     speakPL(name);
@@ -121,7 +125,7 @@ async function refreshDevices() {
   log(`Urządzenia (hub.getDevices): ${devices.length}`);
 
   // Add numeric ports to dropdown (without duplicating existing)
-  const existing = new Set([...colorPortEl.options].map(o => o.value));
+  const existing = new Set([...ui.colorPort.options].map(o => o.value));
 
   for (const d of devices) {
     const pid = d.portId;
@@ -132,9 +136,13 @@ async function refreshDevices() {
     const opt = document.createElement("option");
     opt.value = val;
     opt.textContent = `${val} (type=${d.type ?? "?"})`;
-    colorPortEl.appendChild(opt);
+    ui.colorPort.appendChild(opt);
     existing.add(val);
   }
+}
+
+function resetDirections() {
+  state.directions = { up: false, down: false, left: false, right: false };
 }
 
 document.getElementById("connect").onclick = async () => {
@@ -142,12 +150,12 @@ document.getElementById("connect").onclick = async () => {
   setStatus("łączenie...");
   const res = await ipcRenderer.invoke("boost:connect");
   if (res?.ok) {
-    connected = true;
+    setConnected(true);
     setStatus("połączony");
     log("Połączono OK");
     await refreshDevices();
   } else {
-    connected = false;
+    setConnected(false);
     setStatus("błąd");
     log(`Błąd połączenia: ${res?.error || "?"}`);
   }
@@ -156,53 +164,53 @@ document.getElementById("connect").onclick = async () => {
 document.getElementById("disconnect").onclick = async () => {
   log("Klik: Rozłącz");
   await ipcRenderer.invoke("boost:disconnect");
-  connected = false;
+  setConnected(false);
   setStatus("rozłączony");
   sendDrive(0,0);
 };
 
 document.getElementById("stop").onclick = () => {
   log("Klik: STOP");
-  up=down=left=right=false;
+  resetDirections();
   sendDrive(0,0);
 };
 
-speedEl.oninput = () => {
-  speedVal.textContent = speedEl.value;
+ui.speed.oninput = () => {
+  ui.speedVal.textContent = ui.speed.value;
   applyDrive();
 };
 
-steerEl.oninput = () => {
-  steerVal.textContent = (steerEl.value/100).toFixed(2);
+ui.steer.oninput = () => {
+  ui.steerVal.textContent = (ui.steer.value/100).toFixed(2);
   applyDrive();
 };
 
 window.addEventListener("keydown", e => {
   if (e.repeat) return;
-  if (e.code==="ArrowUp") up=true;
-  if (e.code==="ArrowDown") down=true;
-  if (e.code==="ArrowLeft") left=true;
-  if (e.code==="ArrowRight") right=true;
-  if (e.code==="Space") { up=down=left=right=false; sendDrive(0,0); }
+  if (e.code==="ArrowUp") state.directions.up=true;
+  if (e.code==="ArrowDown") state.directions.down=true;
+  if (e.code==="ArrowLeft") state.directions.left=true;
+  if (e.code==="ArrowRight") state.directions.right=true;
+  if (e.code==="Space") { resetDirections(); sendDrive(0,0); }
   applyDrive();
 });
 
 window.addEventListener("keyup", e => {
-  if (e.code==="ArrowUp") up=false;
-  if (e.code==="ArrowDown") down=false;
-  if (e.code==="ArrowLeft") left=false;
-  if (e.code==="ArrowRight") right=false;
+  if (e.code==="ArrowUp") state.directions.up=false;
+  if (e.code==="ArrowDown") state.directions.down=false;
+  if (e.code==="ArrowLeft") state.directions.left=false;
+  if (e.code==="ArrowRight") state.directions.right=false;
   applyDrive();
 });
 
 window.addEventListener("blur", () => {
-  up=down=left=right=false;
+  resetDirections();
   sendDrive(0,0);
 });
 
-colorAttachBtn.onclick = async () => {
-  const port = colorPortEl.value;
-  const mode = colorModeEl.value;
+ui.colorAttachBtn.onclick = async () => {
+  const port = ui.colorPort.value;
+  const mode = ui.colorMode.value;
 
   log(`Klik: Aktywuj czujnik -> port=${port} mode=${mode}`);
   const res = await ipcRenderer.invoke("boost:colorAttach", { port, mode });
@@ -211,17 +219,17 @@ colorAttachBtn.onclick = async () => {
     const activeMode = res.mode || mode;
     const activeModeId = res.modeId !== undefined ? `id=${res.modeId}` : "";
     log(`OK: czujnik aktywny (port=${port}, mode=${activeMode} ${activeModeId}). Przyłóż klocek.`);
-    lastSpoken = null;
-    lastColorCode = null;
-    colorNameEl.textContent = "—";
-    colorCodeEl.textContent = "—";
-    colorSourceEl.textContent = `${port}/${activeMode}`;
+    state.lastSpoken = null;
+    state.lastColorCode = null;
+    ui.colorName.textContent = "—";
+    ui.colorCode.textContent = "—";
+    ui.colorSource.textContent = `${port}/${activeMode}`;
   } else {
     log(`Błąd aktywacji czujnika: ${res?.error || "?"}`);
   }
 };
 
-refreshDevicesBtn.onclick = async () => {
+ui.refreshDevicesBtn.onclick = async () => {
   log("Klik: Odśwież listę portów");
   await refreshDevices();
 };
@@ -259,8 +267,8 @@ ipcRenderer.on("boost:color", (_evt, msg) => {
   const code = msg.color;
   const source = `${msg.port}/${msg.mode}`;
 
-  if (code === lastColorCode) return;
-  lastColorCode = code;
+  if (code === state.lastColorCode) return;
+  state.lastColorCode = code;
 
   log(`COLOR: ${source} -> ${code} (${COLOR_PL[code] || "?"})`);
   updateColorUI(code, source);
