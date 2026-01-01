@@ -49,6 +49,11 @@ ipcMain.handle("boost:drive", async (_evt, { left, right }) => {
   return { ok: true };
 });
 
+ipcMain.handle("boost:head", async (_evt, { power }) => {
+  await boost.head(power);
+  return { ok: true };
+});
+
 ipcMain.handle("boost:colorAttach", async (_evt, { port, mode }) => {
   try {
     const result = await boost.attachColorSensor(port, mode);
